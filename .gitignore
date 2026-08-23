@@ -1,0 +1,7 @@
+# Never commit a real environment file
+.env
+.env.*
+!.env.example
+
+deploy-bundle/
+node_modules/
