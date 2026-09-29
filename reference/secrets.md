@@ -27,11 +27,18 @@ rsync -a --chmod=F600 --rsync-path="sudo rsync" .env.production <target>:/opt/<a
 ssh <target> 'sudo chown <app>:<app> /opt/<app>/shared/.env && sudo chmod 600 /opt/<app>/shared/.env'
 ```
 
-Changing a value later is a deliberate act: edit it on the host and restart.
+Changing a value later is a deliberate act, and `scripts/push-env.sh` is the
+one way to do it: edit the local production file, then
 
 ```bash
-ssh -t <target> 'sudo -u <app> nano /opt/<app>/shared/.env && sudo systemctl restart <app>'
+./scripts/push-env.sh        # or the manifest alias, e.g. pnpm deploy:env
 ```
+
+It keeps a timestamped backup on the host (`shared/.env.bak-<stamp>`, newest
+five kept), uploads the file with mode 600, restarts, and health-checks. If the
+service does not come back, it restores the backup and restarts again. The
+local file is the source of truth; editing `shared/.env` on the host by hand is
+lost on the next push.
 
 ## Generating values
 
@@ -74,8 +81,8 @@ This also keeps the credentials out of the process list, which
 ## Rotating
 
 1. Generate the new value.
-2. Update `shared/.env` on the host.
-3. `sudo systemctl restart <app>`.
+2. Put it in the local production env file.
+3. `./scripts/push-env.sh`.
 
 Rotating a session-signing secret invalidates every existing session — everyone
 is logged out. That is the intended effect; do it deliberately rather than

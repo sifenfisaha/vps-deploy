@@ -16,6 +16,7 @@ service at `https://api.example.com`. Afterwards:
 
 ```bash
 ./scripts/deploy.sh          # build, ship, swap, restart, verify
+./scripts/push-env.sh        # push a changed .env.production, restart, verify
 ```
 
 ## What you end up with
@@ -28,6 +29,7 @@ service at `https://api.example.com`. Afterwards:
 | **Deploy** | Symlink swap plus a restart — milliseconds, not a rebuild |
 | **Rollback** | The same swap, backwards |
 | **Safety** | Failed health check rolls back automatically |
+| **Secrets** | `push-env.sh` uploads the local env file, restarts, and restores the previous file if the service does not come back |
 | **Isolation** | Hardened unit: read-only filesystem, private `/tmp`, memory cap |
 
 ```
@@ -75,7 +77,8 @@ already runs something in production.
    `Dockerfile`, `go.mod`, `requirements.txt`, or by asking.
 3. **Sets up DNS** — or verifies it, and refuses to continue while the record
    points somewhere that will make certificate issuance fail.
-4. **Writes `scripts/deploy.sh`** into your project, configured for it.
+4. **Writes `scripts/deploy.sh` and `scripts/push-env.sh`** into your project,
+   configured for it.
 5. **Provisions the host** — service account, release layout, environment file,
    systemd unit, Caddy vhost. Only what's missing.
 6. **Deploys and verifies** — build, upload, swap, restart, health check, then
@@ -83,6 +86,21 @@ already runs something in production.
 
 Run `./scripts/deploy.sh` again any time. It inspects first, so a provisioned
 host skips straight to deploying.
+
+## Changing a secret later
+
+`deploy.sh` seeds the environment file once and never overwrites it, so
+rotating a key or adding an allowed origin is its own command:
+
+```bash
+# edit .env.production locally, then
+./scripts/push-env.sh        # or the alias: pnpm deploy:env
+```
+
+It compares keys with the host (names only, never values), backs up the current
+file there, uploads, restarts, and health-checks. If the service does not come
+back, the backup is restored and the service restarted again. The local file is
+the source of truth.
 
 ## What it deliberately won't do
 
@@ -130,6 +148,7 @@ automate the record, other providers, and IPv6.
 | --- | --- |
 | [`SKILL.md`](SKILL.md) | The procedure Claude follows |
 | [`assets/deploy.sh`](assets/deploy.sh) | Provision-or-deploy script, templated per project |
+| [`assets/push-env.sh`](assets/push-env.sh) | Push a changed env file, restart, restore on failure |
 | [`assets/build-node-bundle.mjs`](assets/build-node-bundle.mjs) | Builds a self-sufficient Node bundle |
 | [`reference/dns.md`](reference/dns.md) | Records, the proxy trap, provider APIs |
 | [`reference/runtimes.md`](reference/runtimes.md) | Per-runtime settings and traps |
@@ -153,7 +172,8 @@ START_CMD="/usr/bin/node index.js"
 ```
 
 Every value also reads from the environment (`VPS_APP`, `VPS_HOST`, …), so one
-script serves staging and production.
+script serves staging and production. `assets/push-env.sh` takes the same
+block and stands alone in the same way.
 
 ## Requirements
 

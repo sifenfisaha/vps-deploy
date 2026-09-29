@@ -20,6 +20,9 @@ The end state:
   restart, not an outage.
 - `./scripts/deploy.sh` provisions a host that has never been deployed to, and
   deploys to one that has. Same command either way.
+- `./scripts/push-env.sh` updates the production environment file on the host
+  and restarts the service, restoring the previous file if it does not come
+  back healthy. Secrets are edited locally, never over `ssh` + `nano`.
 
 ## The one rule that matters
 
@@ -111,16 +114,26 @@ fix the proxy setting. Do not continue and hope.
 Copy `assets/deploy.sh` into the project as `scripts/deploy.sh`, fill in the
 config block at the top with the values from Phases 1–3, and make it executable.
 
-Add a script alias to the project manifest. For Node, **use `deploy:server` or
+Do the same with `assets/push-env.sh` as `scripts/push-env.sh`. It takes the
+same config block (`APP`, `HOST`, `PORT`, `ENV_FILE`, `REQUIRED_ENV`,
+`HEALTH_PATH`), so fill it from the values you just used. It is how the user
+changes a secret after the first deploy — see Phase 8.
+
+Add script aliases to the project manifest. For Node, **use `deploy:server` or
 similar, not `deploy`** — `pnpm deploy` is a built-in pnpm command that copies a
 workspace package to a directory, so a script named `deploy` is shadowed by it
 and silently does something else.
 
 ```json
-{ "scripts": { "deploy:server": "./scripts/deploy.sh" } }
+{
+  "scripts": {
+    "deploy:server": "./scripts/deploy.sh",
+    "deploy:env": "./scripts/push-env.sh"
+  }
+}
 ```
 
-Commit the script. Never commit the environment file.
+Commit both scripts. Never commit the environment file.
 
 ## Phase 5 — run it
 
@@ -160,9 +173,37 @@ If anything fails, `reference/troubleshooting.md` is organised by symptom.
 
 Leave a `DEPLOYMENT.md` in the project recording the host, the domain, the port
 and **why that port**, the layout, the environment variables by name, the
-redeploy command, and the rollback steps. Include whatever bit an outsider would
+redeploy command, the env-update command, and the rollback steps. Include whatever bit an outsider would
 otherwise have to rediscover — the port collision, the DNS proxy setting, a
 dependency the bundler hides.
+
+## Phase 8 — changing the environment later
+
+`deploy.sh` seeds `shared/.env` on first provision and never overwrites it, so a
+redeploy cannot change a secret. When the user asks how to add or rotate a
+value — a new origin in `CORS_ORIGINS`, a fresh signing key, a moved database —
+the answer is: edit the local production env file, then
+
+```bash
+./scripts/push-env.sh        # or: pnpm deploy:env
+```
+
+It refuses if the file is tracked by git or missing a `REQUIRED_ENV` key, shows
+which keys differ from the host **by name only** (no value is ever printed),
+backs up the current file on the host, uploads, restarts, and health-checks.
+If the service does not come back it restores the backup and restarts again, so
+a typo in a connection string is a failed command, not downtime.
+
+The local file is therefore the source of truth. Say so in `DEPLOYMENT.md`, and
+never edit `shared/.env` directly on the host — the next push overwrites it.
+
+Two things it deliberately does not do:
+
+- **Ship code.** Env and code change on separate commands, so a config change
+  never accidentally deploys half-finished work, and vice versa.
+- **Print a value.** Even when a key is present on one side only, only the key
+  name appears. `reference/secrets.md` explains why the values stay out of
+  terminals and chat.
 
 ## Rules
 
