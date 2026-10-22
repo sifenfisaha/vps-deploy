@@ -35,7 +35,8 @@ or in CI, ship the artifact. Every step below assumes this.
 Ask for these together, in one message, and do not proceed without them. Never
 invent a value here.
 
-1. **SSH target** — `user@host`. The account needs `sudo`. Confirm it works:
+1. **SSH target** — `user@host`. The account needs passwordless `sudo`: the
+   scripts run `rsync` under it, and rsync cannot prompt. Confirm it works:
    `ssh <target> 'echo ok; sudo -n true 2>&1 | head -1'`
 2. **Domain** — the public hostname, e.g. `api.example.com`.
 3. **DNS control** — who runs the zone, and whether they can give you an API
@@ -74,11 +75,14 @@ guessing here produces a service that dies at boot.
 | --- | --- | --- |
 | `BUILD_CMD` | Produces the artifact locally | `pnpm build` |
 | `BUNDLE_DIR` | The directory that gets uploaded | `dist/` |
-| `START_CMD` | What systemd runs, relative to the release | `/usr/bin/node dist/index.js` |
+| `START_CMD` | What systemd runs, from inside the release | `/usr/bin/node index.js` |
 | `PORT` | Loopback port, free on the host | `3100` |
 
 `reference/runtimes.md` covers Node, Bun, Python, Go, and static sites, and the
-traps in each.
+traps in each. Two that apply to all of them: `START_CMD` must begin with an
+absolute path, because systemd refuses `./app`; and the *contents* of
+`BUNDLE_DIR` become the release, so the entry point is addressed from the
+release root — `index.js`, not `dist/index.js`.
 
 **The bundle must be self-sufficient.** Whatever gets uploaded has to run with
 only the runtime present — no `npm install` on the server. For Node that means
@@ -133,7 +137,9 @@ and silently does something else.
 }
 ```
 
-Commit both scripts. Never commit the environment file.
+Commit both scripts, and for Node the `deploy-bundle-lock.json` the bundler
+writes — it pins the bundle's full dependency tree. Never commit the
+environment file.
 
 ## Phase 5 — run it
 

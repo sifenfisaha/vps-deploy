@@ -57,7 +57,7 @@ Update with `git -C ~/.claude/skills/vps-deploy pull`.
 
 Four things it cannot work out on its own, and won't guess:
 
-1. **SSH target** — `user@host`, with sudo.
+1. **SSH target** — `user@host`, with passwordless sudo.
 2. **Domain** — the hostname to serve.
 3. **DNS access** — who runs the zone. A Cloudflare API token lets it set the
    record for you; otherwise it tells you exactly what to create.
@@ -179,8 +179,9 @@ block and stands alone in the same way.
 
 **Workstation:** bash, ssh, rsync, git, and your project's build toolchain.
 
-**Server:** any systemd Linux (Debian/Ubuntu tested), an account with sudo, your
-app's runtime, and Caddy for TLS. Ports 80 and 443 reachable.
+**Server:** any systemd Linux (Debian/Ubuntu tested), an account with
+passwordless sudo, `rsync`, `curl`, your app's runtime, and Caddy for TLS.
+Ports 80 and 443 reachable.
 
 ## Scope
 

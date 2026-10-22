@@ -21,9 +21,16 @@ Deploying is repointing it and restarting. Rolling back is repointing it the
 other way. Both are atomic and take milliseconds, so a bad release costs a
 restart rather than a rebuild.
 
-The swap is done as `ln -sfn` to a temp name followed by `mv -Tf`, because
-`ln -sfn` onto an existing symlink-to-a-directory can create the link *inside*
-the target instead of replacing it. `mv -Tf` is atomic and has no such edge.
+The swap is done as `ln -sfn` to a temp name followed by `mv -Tf`. Replacing a
+symlink in place is not guaranteed to be one operation; a rename is, so there
+is no instant at which `current` does not exist. The manual rollback in
+`troubleshooting.md` uses the same pair.
+
+The upload lands in `releases/.incoming-<rev>`, written as root, and is renamed
+into place — nothing passes through `/tmp`, where a name anyone can predict
+from the git log would be a race. Release directories are mode 750, so other
+accounts on the host cannot read the code. Old releases are pruned to the
+newest `KEEP` by *deploy* time, and the live one is never on the list.
 
 `shared/` exists so a deploy never has to recreate configuration. The
 environment file is written once and outlives every release.
@@ -40,10 +47,16 @@ useradd --system --home-dir /opt/<app> --shell /usr/sbin/nologin <app>
 Not root, and not the SSH user. If the app is compromised, the blast radius
 should be the app's own files.
 
+The SSH account you deploy *from* is a different matter: it needs passwordless
+sudo, because the upload runs rsync under sudo and rsync has no terminal to
+type a password into. Both scripts check this first and stop before changing
+anything if it is missing.
+
 ## The systemd unit
 
 ```ini
 [Service]
+Type=exec
 User=<app>
 WorkingDirectory=/opt/<app>/current
 EnvironmentFile=/opt/<app>/shared/.env
@@ -51,6 +64,11 @@ ExecStart=<start command>
 Restart=always
 RestartSec=3
 ```
+
+`Type=exec` rather than `simple`: a start then fails immediately when the
+executable is missing, instead of reporting success and dying a moment later.
+`ExecStart` must begin with an absolute path — systemd refuses `./app` — so a
+binary shipped inside the release is `/opt/<app>/current/<name>`.
 
 `Restart=always` covers crashes; `WantedBy=multi-user.target` with
 `systemctl enable` covers reboots. **Both are needed** — a service that survives
@@ -64,6 +82,11 @@ The hardening block is not decoration on a shared box:
 | `ProtectHome=true` | No access to `/home`, `/root` |
 | `PrivateTmp=true` | Its own `/tmp`, invisible to other services |
 | `NoNewPrivileges=true` | Cannot gain privileges via setuid |
+| `CapabilityBoundingSet=` | No capabilities at all, whatever tries to grant them |
+| `PrivateDevices=true` | No access to physical devices |
+| `RestrictAddressFamilies=…` | Only Unix, IPv4, IPv6 and netlink sockets |
+| `RestrictNamespaces=true` | Cannot create namespaces — drop it for a headless browser that sandboxes itself |
+| `SystemCallArchitectures=native` | No foreign-ABI system calls |
 | `MemoryMax=512M` | A leak here cannot starve neighbours |
 
 `ProtectSystem=strict` means **the app cannot write anywhere**. If it needs to

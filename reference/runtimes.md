@@ -14,32 +14,56 @@ server, where they cost far more to diagnose.
 
 ```bash
 cd <BUNDLE_DIR>
-env $(grep -v '^#' ../.env.production | xargs) PORT=39999 <START_CMD>
+PORT=39999 node --env-file=../.env.production index.js    # Node 20.6+
+PORT=39999 bun --env-file=../.env.production index.js     # Bun
 # in another shell:
 curl -fsS http://127.0.0.1:39999/
+```
+
+For a runtime without an env-file flag, let systemd parse the file exactly as
+it will on the host:
+
+```bash
+systemd-run --user --pipe --wait --collect -p WorkingDirectory=$PWD \
+  -p EnvironmentFile=$PWD/../.env.production -p Environment=PORT=39999 $PWD/app
 ```
 
 If it starts and answers here, it will start on the server. If it dies with a
 missing module, you found it in the right place.
 
-**Do not load the env file with `set -a; . .env`.** Values containing `&`, `|`
-or `;` — which connection strings frequently do — are interpreted by the shell,
-silently truncating the value. systemd's `EnvironmentFile` does no such parsing,
-so the failure appears only in your test harness, and looks like the variable is
-unset. Use `env $(grep -v '^#' file | xargs)` or export the keys individually.
+**Do not load the env file with `set -a; . .env`, and do not pass the values
+on the command line either.** The first mangles them: `&`, `|` or `;` — which
+connection strings frequently contain — are interpreted by the shell, silently
+truncating the value, so the failure appears only in your test harness and
+looks like the variable is unset. The second puts every secret in
+`/proc/<pid>/cmdline`, readable by any process on the machine (`secrets.md`).
+systemd's `EnvironmentFile` does neither, and nor do the flags above.
 
 ## Node
 
 ```bash
 BUILD_CMD="npm run build && node scripts/build-node-bundle.mjs"
 BUNDLE_DIR="deploy-bundle"
-START_CMD="/usr/bin/node dist/index.js"
+START_CMD="/usr/bin/node index.js"
 RUNTIME_BIN="node"
 ```
 
-`node_modules` has to travel. `assets/build-node-bundle.mjs` builds a
-production-only tree by reading the bare imports back out of the built files and
-resolving each to the version your lockfile picked.
+`node_modules` has to travel. `assets/build-node-bundle.mjs` (copy it to
+`scripts/`) builds a production-only tree by reading the bare imports back out
+of the built files and resolving each to the installed version. It copies the
+*contents* of `dist/` to the bundle root, and the deploy script uploads the
+contents of `BUNDLE_DIR` as the release, so the entry point is `index.js` at
+the release root — not `dist/index.js`. The bundle's `package.json` takes its
+`type` from the nearest manifest above `dist/`, so CommonJS and ESM builds both
+start.
+
+**The lockfile.** The first run writes `deploy-bundle-lock.json` next to
+`package.json`; commit it. Later runs install from it with `npm ci`, so
+production gets the transitive tree you tested rather than whatever the
+registry serves that day. When a direct dependency changes, the bundler
+regenerates it and asks you to commit the diff. npm-style `overrides` in the
+root manifest carry over; `pnpm.overrides` and patched dependencies do not,
+which is one more reason to start the bundle locally first.
 
 **The trap: a bundler telling you a dependency is inlined does not mean it is
 unnecessary.** A dependency left external can resolve its *own* driver at load
@@ -69,7 +93,7 @@ fine inside a Docker layer that gets discarded; it is not fine over rsync.
 ```bash
 BUILD_CMD="bun build ./src/index.ts --target=bun --outdir=dist"
 BUNDLE_DIR="dist"
-START_CMD="/usr/local/bin/bun dist/index.js"
+START_CMD="/usr/local/bin/bun index.js"
 RUNTIME_BIN="bun"
 ```
 
@@ -80,7 +104,8 @@ able to execute it. A bun installed under `/root` is unusable by a service
 running as anyone else.
 
 `bun build --compile` produces a single executable, which sidesteps this
-neatly: `START_CMD="./myapp"`.
+neatly: `START_CMD="/opt/<app>/current/myapp"` — absolute, because systemd
+refuses a relative `ExecStart`.
 
 ## Python
 
@@ -89,6 +114,8 @@ BUILD_CMD="python -m venv .venv-dist && .venv-dist/bin/pip install -r requiremen
 BUNDLE_DIR="dist"
 START_CMD="/usr/bin/python3 -m gunicorn app:app --bind 127.0.0.1:3100"
 RUNTIME_BIN="python3"
+# and in the env file, so a --target install is importable:
+# PYTHONPATH=/opt/<app>/current/src:/opt/<app>/current/deps
 ```
 
 Python does not relocate cleanly. Two options that work:
@@ -109,12 +136,14 @@ wheels.
 ```bash
 BUILD_CMD="CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o dist/app ./cmd/server"
 BUNDLE_DIR="dist"
-START_CMD="./app"
+START_CMD="/opt/<app>/current/app"
 RUNTIME_BIN="sh"
 ```
 
 The easiest case: one static binary, no runtime to install. `RUNTIME_BIN=sh`
 because the preflight wants *something* to check and there is no interpreter.
+`START_CMD` is the binary's absolute path through the `current` symlink;
+systemd refuses `./app` outright.
 
 Match `GOARCH` to the host — `uname -m` on the server. `x86_64` is `amd64`,
 `aarch64` is `arm64`. A wrong-architecture binary fails with a bare "Exec format
