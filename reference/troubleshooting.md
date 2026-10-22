@@ -33,8 +33,9 @@ path is wrong, or the binary is not executable, or it lives somewhere the
 service user cannot read (`/root/.bun/bin/bun` is the classic). `ExecStart` needs
 an absolute path.
 
-**`status=200/CHDIR`** — `WorkingDirectory` does not exist. Usually `current`
-points at a release that was pruned.
+**`status=200/CHDIR`** — `WorkingDirectory` does not exist: `current` points at
+a directory that is gone. The deploy script never prunes the live release, so
+look for a hand-run `rm`, or a `current` edited by hand.
 
 **`EADDRINUSE`** — something else holds the port.
 `sudo ss -tlnp | grep :<port>`. Note the service may keep restarting while the
@@ -45,14 +46,17 @@ returns the wrong app.
 `ReadWritePaths=` for the directory the app needs, under `shared/`.
 
 **Environment validation failure at boot** — a variable is missing or malformed.
-Check what systemd actually loaded:
+systemd loads `shared/.env` literally, so check the file itself — key names and
+value lengths only, never the values:
 
 ```bash
-ssh <target> 'sudo systemctl show <app> -p Environment'
+ssh <target> "sudo awk -F= '{print \$1, length(\$0)-length(\$1)-1}' /opt/<app>/shared/.env"
 ```
 
-If a value looks truncated at a `&` or `;`, something parsed the env file with a
-shell. systemd does not; whatever wrote the file did.
+A value shorter than you expect, cut at a `&` or `;`, means whatever *wrote*
+the file parsed it with a shell. If the file is right and a local test still
+sees a truncated value, the test harness is doing the parsing — see
+`runtimes.md` for how to load it.
 
 ## Certificate will not issue
 
@@ -112,18 +116,20 @@ not exist. Provisioning did not complete; re-run.
 **`chown: invalid user`** — the service user was not created. Same cause.
 
 **Permission denied on `/opt/<app>`** — the SSH account lacks sudo, or sudo
-requires a password and no TTY was allocated. Use `ssh -t`.
+asks for a password. The scripts need it passwordless and check for that
+before touching anything; if you got this far, sudo rules changed since.
 
 **rsync "command not found"** — install rsync on the host.
 
 **Health check fails and it rolls back** — working as designed. The journal
-lines it printed are from the *new* release. The old one is serving again.
+lines it printed were captured before the rollback, so they are the *new*
+release's. It then reports whether the old one came back healthy.
 
 ## Rollback
 
 ```bash
 ssh <target> 'ls -1t /opt/<app>/releases'
-ssh <target> 'sudo ln -sfn /opt/<app>/releases/<previous> /opt/<app>/current && sudo systemctl restart <app>'
+ssh <target> 'sudo ln -sfn /opt/<app>/releases/<previous> /opt/<app>/current.tmp && sudo mv -Tf /opt/<app>/current.tmp /opt/<app>/current && sudo systemctl restart <app>'
 ```
 
 A migration already applied is **not** undone by this. Rolling code back onto a

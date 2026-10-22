@@ -23,7 +23,7 @@ The deploy script rsyncs the local file to `shared/.env` on **first provision
 only**, then chmods it 600 and never touches it again.
 
 ```bash
-rsync -a --chmod=F600 --rsync-path="sudo rsync" .env.production <target>:/opt/<app>/shared/.env
+rsync -a --chmod=F600 --rsync-path="sudo -n rsync" .env.production <target>:/opt/<app>/shared/.env
 ssh <target> 'sudo chown <app>:<app> /opt/<app>/shared/.env && sudo chmod 600 /opt/<app>/shared/.env'
 ```
 

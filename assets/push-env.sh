@@ -11,7 +11,10 @@
 # the new one, the backup is restored and the service restarted again — a bad
 # edit costs a restart, not an outage.
 #
-# Never prints a value: the comparison with the host is by key name only.
+# Never prints a value: the comparison with the host is by key name only, and
+# the key names are extracted on the host, so the values never leave it.
+#
+# The ssh account needs passwordless sudo, as for deploy.sh.
 #
 # ---------------------------------------------------------------------------
 # CONFIG — the same values as deploy.sh. Every one reads from the environment
@@ -21,7 +24,7 @@
 # Short name. The service unit, the system user, and /opt/<APP>.
 APP="${VPS_APP:-myapp}"
 
-# ssh target. The account needs sudo.
+# ssh target. The account needs passwordless sudo.
 HOST="${VPS_HOST:-deploy@203.0.113.10}"
 
 # Loopback port Caddy proxies to. The health check hits it directly.
@@ -53,6 +56,16 @@ APP_DIR="/opt/$APP"
 SHARED_DIR="$APP_DIR/shared"
 REMOTE_ENV="$SHARED_DIR/.env"
 
+# Spliced into commands that run as root on the host; reject anything odd here.
+[[ "$APP" =~ ^[a-z_][a-z0-9_-]*$ ]] || die "APP must be a plain lowercase name, got '$APP'"
+[[ "$PORT" =~ ^[0-9]+$ ]]            || die "PORT must be a number, got '$PORT'"
+[[ "$KEEP_BACKUPS" =~ ^[0-9]+$ ]]    || die "KEEP_BACKUPS must be a number, got '$KEEP_BACKUPS'"
+case "$HEALTH_PATH" in
+	/*) ;;
+	*)  die "HEALTH_PATH must start with /, got '$HEALTH_PATH'" ;;
+esac
+[[ "$HEALTH_PATH" != *[[:space:]\'\"]* ]] || die "HEALTH_PATH cannot contain spaces or quotes, got '$HEALTH_PATH'"
+
 # --- local checks -----------------------------------------------------------
 
 [ -f "$ENV_FILE" ] || die "$ENV_FILE does not exist."
@@ -69,12 +82,23 @@ fi
 # --- remote checks ----------------------------------------------------------
 
 say "checking $HOST"
-ssh "$HOST" "sudo test -d $SHARED_DIR" 2>/dev/null \
-	|| die "$SHARED_DIR does not exist on $HOST. Run ./scripts/deploy.sh first; it provisions the host and seeds the file."
+# Key names are extracted on the host; only they travel back.
+STATE="$(ssh "$HOST" "
+	printf 'sudo=%s\n'   \"\$(sudo -n true 2>/dev/null && echo yes || echo no)\"
+	printf 'shared=%s\n' \"\$(sudo -n test -d $SHARED_DIR && echo yes || echo no)\"
+	printf 'unit=%s\n'   \"\$([ -f /etc/systemd/system/$APP.service ] && echo yes || echo no)\"
+	printf 'keys=%s\n'   \"\$(sudo -n grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' $REMOTE_ENV 2>/dev/null | tr '\n' ' ')\"
+")"
+get() { printf '%s\n' "$STATE" | sed -n "s/^$1=//p" | head -1; }
+
+[ "$(get sudo)" = yes ] || die "$HOST: sudo needs a password for this account, or is missing.
+   Passwordless sudo is required — rsync runs under it and cannot prompt."
+{ [ "$(get shared)" = yes ] && [ "$(get unit)" = yes ]; } \
+	|| die "$APP is not provisioned on $HOST. Run ./scripts/deploy.sh first; it creates the layout and the unit and seeds the file."
 
 # Compare by key only, so no value is ever printed.
-LOCAL_KEYS="$(grep -oE '^[A-Z0-9_]+=' "$ENV_FILE" | sort -u)"
-REMOTE_KEYS="$(ssh "$HOST" "sudo cat $REMOTE_ENV 2>/dev/null" | grep -oE '^[A-Z0-9_]+=' | sort -u || true)"
+LOCAL_KEYS="$(grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' "$ENV_FILE" | sort -u)"
+REMOTE_KEYS="$(get keys | tr ' ' '\n' | grep . | sort -u || true)"
 if [ "$LOCAL_KEYS" = "$REMOTE_KEYS" ]; then
 	echo "    same keys on both sides (values may differ)"
 else
@@ -87,12 +111,13 @@ fi
 say "uploading $ENV_FILE -> $HOST:$REMOTE_ENV"
 STAMP="$(date +%Y%m%d%H%M%S)"
 BACKUP="$SHARED_DIR/.env.bak-$STAMP"
-ssh "$HOST" "if sudo test -f $REMOTE_ENV; then sudo cp -a $REMOTE_ENV $BACKUP; fi"
-rsync -a --chmod=F600 --rsync-path="sudo rsync" "$ENV_FILE" "$HOST:$REMOTE_ENV"
+ssh "$HOST" "if sudo -n test -f $REMOTE_ENV; then sudo -n cp -a $REMOTE_ENV $BACKUP; fi"
+rsync -a --chmod=F600 --rsync-path="sudo -n rsync" "$ENV_FILE" "$HOST:$REMOTE_ENV"
 ssh "$HOST" "
-	sudo chown $APP:$APP $REMOTE_ENV && sudo chmod 600 $REMOTE_ENV
-	# Keep only the newest backups.
-	sudo ls -1t $SHARED_DIR/.env.bak-* 2>/dev/null | tail -n +$((KEEP_BACKUPS + 1)) | sudo xargs -r rm -f
+	sudo -n chown $APP:$APP $REMOTE_ENV && sudo -n chmod 600 $REMOTE_ENV
+	# Keep only the newest backups. The glob is expanded as root, so it does
+	# not depend on what the ssh account may list.
+	sudo -n sh -c 'ls -1t $SHARED_DIR/.env.bak-* 2>/dev/null' | tail -n +$((KEEP_BACKUPS + 1)) | sudo -n xargs -r rm -f
 "
 
 # --- restart and verify, restoring on failure --------------------------------
@@ -100,23 +125,36 @@ ssh "$HOST" "
 say "restarting $APP"
 ssh "$HOST" "
 set -e
-sudo systemctl restart $APP
-healthy=0
-for _ in \$(seq 1 30); do
-	if curl -fsS -m 3 'http://127.0.0.1:$PORT$HEALTH_PATH' >/dev/null 2>&1; then healthy=1; break; fi
-	sleep 1
-done
-if [ \"\$healthy\" -ne 1 ]; then
-	echo '!! $APP did not come back with the new environment'
-	if sudo test -f $BACKUP; then
+healthy() {
+	for _ in \$(seq 1 \"\$1\"); do
+		if systemctl is-active --quiet $APP && curl -fsS -m 3 'http://127.0.0.1:$PORT$HEALTH_PATH' >/dev/null 2>&1; then
+			return 0
+		fi
+		sleep 1
+	done
+	return 1
+}
+# A refused restart must reach the restore below rather than abort here, so
+# its status is ignored; health decides.
+sudo -n systemctl reset-failed $APP 2>/dev/null || true
+sudo -n systemctl restart $APP || true
+if ! healthy 30; then
+	echo '!! $APP did not come back with the new environment; journal:'
+	sudo -n journalctl -u $APP -n 30 --no-pager -o cat
+	if sudo -n test -f $BACKUP; then
 		echo '   restoring the previous file and restarting'
-		sudo cp -a $BACKUP $REMOTE_ENV
-		sudo systemctl restart $APP
+		sudo -n cp -a $BACKUP $REMOTE_ENV
+		sudo -n systemctl reset-failed $APP 2>/dev/null || true
+		sudo -n systemctl restart $APP || true
+		if healthy 30; then
+			echo '==> $APP is serving again with the previous environment'
+		else
+			echo '!! $APP did not come back with the previous file either; it is down'
+		fi
 	fi
-	sudo journalctl -u $APP -n 30 --no-pager -o cat
 	exit 1
 fi
-if sudo test -f $BACKUP; then
+if sudo -n test -f $BACKUP; then
 	echo \"==> $APP is up with the new environment (previous file kept at $BACKUP)\"
 else
 	echo \"==> $APP is up with the new environment\"
